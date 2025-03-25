@@ -4,6 +4,7 @@
 use super::methods::{GoodbyeReason, RpcErrorResponse, RpcResponse};
 use super::outbound::OutboundRequestContainer;
 use super::protocol::{InboundOutput, Protocol, RPCError, RPCProtocol, RequestType};
+use super::MalloryLocalConfig;
 use super::RequestId;
 use super::{RPCReceived, RPCSend, ReqId, Request};
 use crate::rpc::outbound::OutboundFramed;
@@ -142,6 +143,9 @@ where
 
     /// Information about this handler for logging purposes.
     log_info: (PeerId, ConnectionId),
+
+    /// Additional configurations for the RPC Handler
+    config: MalloryLocalConfig,
 }
 
 enum HandlerState {
@@ -226,6 +230,7 @@ where
         resp_timeout: Duration,
         peer_id: PeerId,
         connection_id: ConnectionId,
+        config: MalloryLocalConfig,
     ) -> Self {
         RPCHandler {
             listen_protocol,
@@ -245,6 +250,7 @@ where
             waker: None,
             resp_timeout,
             log_info: (peer_id, connection_id),
+            config,
         }
     }
 
@@ -707,8 +713,10 @@ where
                                         request,
                                     };
                                 substream_entry.max_remaining_chunks = Some(max_remaining_chunks);
-                                self.outbound_substreams_delay
-                                    .reset(delay_key, self.resp_timeout);
+                                self.outbound_substreams_delay.reset(
+                                    delay_key,
+                                    Duration::from_secs(self.config.outbound_timeout),
+                                );
                             }
                         }
 
@@ -1027,9 +1035,10 @@ where
                 Some(max_responses)
             };
             // new outbound request. Store the stream and tag the output.
-            let delay_key = self
-                .outbound_substreams_delay
-                .insert(self.current_outbound_substream_id, self.resp_timeout);
+            let delay_key = self.outbound_substreams_delay.insert(
+                self.current_outbound_substream_id,
+                Duration::from_secs(self.config.outbound_timeout),
+            );
             let awaiting_stream = OutboundSubstreamState::RequestPendingResponse {
                 substream: Box::new(substream),
                 request,

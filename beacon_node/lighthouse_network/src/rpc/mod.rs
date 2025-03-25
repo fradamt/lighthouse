@@ -34,11 +34,14 @@ pub use methods::{
     BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason, LightClientBootstrapRequest,
     ResponseTermination, RpcErrorResponse, StatusMessage,
 };
-pub use protocol::{max_rpc_size, Protocol, RPCError};
 
 use self::config::{InboundRateLimiterConfig, OutboundRateLimiterConfig};
 use self::protocol::RPCProtocol;
 use self::self_limiter::SelfRateLimiter;
+use crate::MalloryConfig;
+
+pub use methods::{RawMode, RawRequest};
+pub use protocol::{max_rpc_size, Protocol, RPCError, SupportedProtocol};
 
 pub(crate) mod codec;
 pub mod config;
@@ -149,6 +152,16 @@ pub struct NetworkParams {
     pub resp_timeout: Duration,
 }
 
+/// Additional configurations for the RPC Behaviour.
+#[derive(Clone, Copy)]
+pub struct MalloryLocalConfig {
+    /// Timeout in seconds for inbound connections.
+    pub inbound_timeout: u64,
+    /// Timeout for outbound connections.
+    pub outbound_timeout: u64,
+    pub self_handle_ping: bool,
+}
+
 /// Implements the libp2p `NetworkBehaviour` trait and therefore manages network-level
 /// logic.
 pub struct RPC<Id: ReqId, E: EthSpec> {
@@ -164,6 +177,9 @@ pub struct RPC<Id: ReqId, E: EthSpec> {
     network_params: NetworkParams,
     /// A sequential counter indicating when data gets modified.
     seq_number: u64,
+
+    /// Mallory Config
+    config: MalloryLocalConfig,
 }
 
 impl<Id: ReqId, E: EthSpec> RPC<Id, E> {
@@ -180,6 +196,7 @@ impl<Id: ReqId, E: EthSpec> RPC<Id, E> {
         outbound_rate_limiter_config: Option<OutboundRateLimiterConfig>,
         network_params: NetworkParams,
         seq_number: u64,
+        mallory_config: &MalloryConfig,
     ) -> Self {
         let inbound_limiter = inbound_rate_limiter_config.map(|config| {
             debug!(?config, "Using inbound rate limiting params");
@@ -192,6 +209,16 @@ impl<Id: ReqId, E: EthSpec> RPC<Id, E> {
                 .expect("Configuration parameters are valid")
         });
 
+        let mallory_config = MalloryLocalConfig {
+            inbound_timeout: mallory_config
+                .inbound_rpc_timeout
+                .unwrap_or(network_params.resp_timeout.as_secs()),
+            outbound_timeout: mallory_config
+                .outbound_rpc_timeout
+                .unwrap_or(network_params.resp_timeout.as_secs()),
+            self_handle_ping: mallory_config.user_handle_ping,
+        };
+
         RPC {
             limiter: inbound_limiter,
             self_limiter,
@@ -200,6 +227,7 @@ impl<Id: ReqId, E: EthSpec> RPC<Id, E> {
             enable_light_client_server,
             network_params,
             seq_number,
+            config: mallory_config,
         }
     }
 
@@ -295,6 +323,22 @@ impl<Id: ReqId, E: EthSpec> RPC<Id, E> {
         trace!(%peer_id, "Sending Ping");
         self.send_request(peer_id, id, RequestType::Ping(ping));
     }
+
+    /// Sends a pong response
+    pub fn pong(
+        &mut self,
+        peer_id: PeerId,
+        request_id: RequestId,
+        stream_id: (ConnectionId, SubstreamId),
+        data: u64,
+    ) {
+        self.send_response(
+            peer_id,
+            (stream_id.0, stream_id.1),
+            request_id,
+            RpcResponse::Success(RpcSuccessResponse::Pong(Ping { data })),
+        );
+    }
 }
 
 impl<Id, E> NetworkBehaviour for RPC<Id, E>
@@ -329,6 +373,7 @@ where
             self.network_params.resp_timeout,
             peer_id,
             connection_id,
+            self.config.clone(),
         );
 
         Ok(handler)
@@ -359,6 +404,7 @@ where
             self.network_params.resp_timeout,
             peer_id,
             connection_id,
+            self.config,
         );
 
         Ok(handler)
@@ -488,15 +534,17 @@ where
 
                 // If we received a Ping, we queue a Pong response.
                 if let RequestType::Ping(_) = r#type {
-                    trace!(connection_id = %conn_id, %peer_id, "Received Ping, queueing Pong");
-                    self.send_response(
-                        peer_id,
-                        (conn_id, substream_id),
-                        id,
-                        RpcResponse::Success(RpcSuccessResponse::Pong(Ping {
-                            data: self.seq_number,
-                        })),
-                    );
+                    if !self.config.self_handle_ping {
+                        trace!(connection_id = %conn_id, %peer_id, "Received Ping, queueing Pong");
+                        self.send_response(
+                            peer_id,
+                            (conn_id, substream_id),
+                            id,
+                            RpcResponse::Success(RpcSuccessResponse::Pong(Ping {
+                                data: self.seq_number,
+                            })),
+                        );
+                    }
                 }
 
                 self.events.push(ToSwarm::GenerateEvent(RPCMessage {
