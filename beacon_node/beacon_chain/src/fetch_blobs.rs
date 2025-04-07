@@ -242,19 +242,6 @@ async fn fetch_and_process_blobs_v2<T: BeaconChainTypes>(
         return Ok(None);
     }
 
-    if chain
-        .canonical_head
-        .fork_choice_read_lock()
-        .contains_block(&block_root)
-    {
-        // Avoid computing columns if block has already been imported.
-        debug!(
-            info = "block has already been imported",
-            "Ignoring EL blobs response"
-        );
-        return Ok(None);
-    }
-
     // TODO: we could get rid of the receiver and just await on the blocking task, given the
     // compute cell operation is very cheap.
     let data_columns_receiver = spawn_compute_and_publish_data_columns_task(
